@@ -13,9 +13,8 @@ Home Assistant custom integration that precomputes and keeps Hue scenes in sync 
 ## Requirements
 
 - Home Assistant Hue integration must already be installed and working.
-- Circadian entities should exist (defaults):
-  - `sensor.circadian_values`
-  - `switch.circadian_lighting_circadian_lighting`
+- Circadian sensor entity should exist (default): `sensor.circadian_values`
+- Circadian Lighting switch entities should expose a `brightness` attribute.
 
 ## Installation
 
@@ -58,4 +57,4 @@ Each service optionally supports `entry_id` to target a specific integration ent
 
 - This integration uses Hue CLIP API v2 endpoints.
 - SSL verification defaults to disabled, matching many local Hue bridge environments.
-- If no per-room Circadian Lighting switch matches a Hue room name, the integration falls back to the configured brightness entity.
+- If no per-room Circadian Lighting switch matches a Hue room name, the integration falls back to a valid configured `brightness_entity` or auto-detects a Circadian Lighting-owned switch.

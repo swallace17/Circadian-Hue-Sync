@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -292,41 +293,51 @@ class SceneSyncManager:
     def _get_fallback_brightness(self) -> int | None:
         brightness_state = self.hass.states.get(self.brightness_entity)
         if brightness_state is None:
-            return None
+            _LOGGER.debug(
+                "Configured fallback brightness entity '%s' not found; auto-detecting Circadian Lighting switch",
+                self.brightness_entity,
+            )
+        else:
+            brightness = brightness_state.attributes.get("brightness")
+            if brightness is not None:
+                return int(round(float(brightness)))
 
-        brightness = brightness_state.attributes.get("brightness")
-        if brightness is None:
-            return None
+            _LOGGER.debug(
+                "Configured fallback brightness entity '%s' has no brightness attribute; auto-detecting Circadian Lighting switch",
+                self.brightness_entity,
+            )
 
-        return int(round(float(brightness)))
+        brightness = self._get_autodetected_fallback_brightness(prefer_unassigned=True)
+        if brightness is not None:
+            return brightness
+
+        brightness = self._get_autodetected_fallback_brightness(prefer_unassigned=False)
+        if brightness is not None:
+            return brightness
+
+        # Final fallback: use global circadian brightness when available.
+        circadian_state = self.hass.states.get(self.circadian_sensor_entity)
+        if circadian_state is not None:
+            circadian_brightness = circadian_state.attributes.get("brightness")
+            if circadian_brightness is not None:
+                _LOGGER.debug(
+                    "Using circadian sensor '%s' brightness as fallback source",
+                    self.circadian_sensor_entity,
+                )
+                return int(round(float(circadian_brightness)))
+
+        return None
 
     def _get_room_brightness_by_name(self) -> dict[str, int]:
-        entity_registry = er.async_get(self.hass)
         area_registry = ar.async_get(self.hass)
-        device_registry = dr.async_get(self.hass)
 
         brightness_by_room: dict[str, int] = {}
-        for entity_entry in entity_registry.entities.values():
-            if entity_entry.domain != "switch":
-                continue
-
-            if not _is_circadian_switch(entity_entry):
-                continue
-
-            area_id = entity_entry.area_id
-            if not area_id and entity_entry.device_id:
-                device = device_registry.async_get(entity_entry.device_id)
-                area_id = device.area_id if device else None
-
-            if not area_id:
+        for entity_id, state, area_id in self._iter_circadian_switch_states():
+            if state is None or not area_id:
                 continue
 
             area = area_registry.async_get_area(area_id)
             if not area:
-                continue
-
-            state = self.hass.states.get(entity_entry.entity_id)
-            if state is None:
                 continue
 
             brightness = state.attributes.get("brightness")
@@ -337,7 +348,7 @@ class SceneSyncManager:
             if area_key in brightness_by_room:
                 _LOGGER.debug(
                     "Ignoring additional Circadian switch '%s' for area '%s'; using first discovered brightness source",
-                    entity_entry.entity_id,
+                    entity_id,
                     area.name,
                 )
                 continue
@@ -366,6 +377,65 @@ class SceneSyncManager:
             self.brightness_entity,
         )
         return None
+
+    def _get_autodetected_fallback_brightness(self, *, prefer_unassigned: bool) -> int | None:
+        for entity_id, state, area_id in self._iter_circadian_switch_states():
+            if state is None:
+                continue
+
+            brightness = state.attributes.get("brightness")
+            if brightness is None:
+                continue
+
+            if prefer_unassigned and area_id:
+                continue
+
+            _LOGGER.debug(
+                "Using auto-detected Circadian Lighting switch '%s' as fallback brightness source",
+                entity_id,
+            )
+            return int(round(float(brightness)))
+
+        return None
+
+    def _iter_circadian_switch_states(self):
+        entity_registry = er.async_get(self.hass)
+        device_registry = dr.async_get(self.hass)
+        yielded_entity_ids: set[str] = set()
+
+        for entity_id in sorted(entity_registry.entities):
+            entity_entry = entity_registry.entities[entity_id]
+            if entity_entry.domain != "switch":
+                continue
+
+            if not _is_circadian_switch(entity_entry):
+                continue
+
+            area_id = entity_entry.area_id
+            if not area_id and entity_entry.device_id:
+                device = device_registry.async_get(entity_entry.device_id)
+                area_id = device.area_id if device else None
+
+            yielded_entity_ids.add(entity_entry.entity_id)
+            yield entity_entry.entity_id, self.hass.states.get(entity_entry.entity_id), area_id
+
+        # Some environments may have runtime switch states that are not discoverable
+        # via entity registry lookups. Include those based on entity_id prefix.
+        for entity_id in sorted(self.hass.states.async_entity_ids("switch")):
+            if entity_id in yielded_entity_ids:
+                continue
+            if not _is_circadian_switch_entity_id(entity_id):
+                continue
+
+            area_id: str | None = None
+            entity_entry = entity_registry.async_get(entity_id)
+            if entity_entry:
+                area_id = entity_entry.area_id
+                if not area_id and entity_entry.device_id:
+                    device = device_registry.async_get(entity_entry.device_id)
+                    area_id = device.area_id if device else None
+
+            yield entity_id, self.hass.states.get(entity_id), area_id
 
 
 class MultiBridgeSceneSyncManager:
@@ -532,7 +602,7 @@ def _normalize_name(value: str) -> str:
     return " ".join(value.strip().lower().split())
 
 
-def _room_name(room: dict) -> str:
+def _room_name(room: dict[str, Any]) -> str:
     return str(room.get("metadata", {}).get("name") or "")
 
 
@@ -540,4 +610,8 @@ def _is_circadian_switch(entity_entry: er.RegistryEntry) -> bool:
     if entity_entry.platform == "circadian_lighting":
         return True
 
-    return entity_entry.entity_id.startswith("switch.circadian_lighting_")
+    return _is_circadian_switch_entity_id(entity_entry.entity_id)
+
+
+def _is_circadian_switch_entity_id(entity_id: str) -> bool:
+    return entity_id.startswith("switch.circadian_lighting")
