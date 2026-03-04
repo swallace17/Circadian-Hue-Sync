@@ -1,6 +1,6 @@
 # Circadian Hue Scene Sync
 
-Home Assistant custom integration that precomputes and keeps Hue scenes in sync with current circadian lighting values.
+Home Assistant custom integration that precomputes and keeps Hue scenes in sync with current circadian lighting values (From the Circadian Lighting custom integration in HACS).
 
 ## What it does
 
@@ -21,7 +21,7 @@ Home Assistant custom integration that precomputes and keeps Hue scenes in sync 
 ### Option A: HACS (recommended once published)
 
 1. HACS -> Integrations -> menu -> Custom repositories.
-2. Add your repository URL with category `Integration`.
+2. Add this repository URL (https://github.com/swallace17/Circadian-Hue-Sync/) with category `Integration`.
 3. Install `Circadian Hue Scene Sync`.
 4. Restart Home Assistant.
 5. Add integration: `Settings -> Devices & Services -> Add Integration -> Circadian Hue Scene Sync`.
