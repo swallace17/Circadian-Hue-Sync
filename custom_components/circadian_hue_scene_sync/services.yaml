@@ -1,0 +1,43 @@
+create_missing_scenes:
+  name: Create Missing Scenes
+  description: Create missing Hue scenes in each room for the configured scene name.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: Optional config entry ID to target a specific integration instance.
+      required: false
+      selector:
+        text:
+
+sync_scenes:
+  name: Sync Scenes
+  description: Sync existing Hue scenes to current circadian values.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: Optional config entry ID to target a specific integration instance.
+      required: false
+      selector:
+        text:
+
+full_sync:
+  name: Full Sync
+  description: Create missing scenes, then sync all existing scenes.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: Optional config entry ID to target a specific integration instance.
+      required: false
+      selector:
+        text:
+
+remove_circadian_scenes:
+  name: Remove Circadian Scenes
+  description: Delete all Hue scenes matching the configured scene name.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: Optional config entry ID to target a specific integration instance.
+      required: false
+      selector:
+        text:

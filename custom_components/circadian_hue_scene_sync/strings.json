@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Use Existing Hue Integrations",
+        "description": "This integration requires Home Assistant Hue integrations to already be installed and configured. It will auto-discover all configured Hue bridges and sync scenes across all of them.",
+        "data": {
+          "verify_ssl": "Verify SSL certificate"
+        }
+      }
+    },
+    "error": {
+      "missing_hue": "No configured Hue integration with usable credentials was found"
+    },
+    "abort": {
+      "already_configured": "This integration is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Circadian Hue Scene Sync options",
+        "data": {
+          "circadian_sensor_entity": "Circadian sensor entity",
+          "brightness_entity": "Brightness source entity",
+          "scene_name": "Scene name",
+          "scenes_per_second": "Max scene updates per second",
+          "auto_update_on_circadian_change": "Auto sync when circadian sensor changes",
+          "auto_create_on_area_change": "Auto create scenes on area updates",
+          "update_on_startup": "Run full sync on startup",
+          "include_on_action": "Set scene actions to turn lights on",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      }
+    }
+  }
+}

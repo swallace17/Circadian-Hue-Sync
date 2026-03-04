@@ -1,0 +1,6 @@
+{
+  "name": "Circadian Hue Scene Sync",
+  "homeassistant": "2025.1.0",
+  "render_readme": true,
+  "filename": "custom_components/circadian_hue_scene_sync"
+}
