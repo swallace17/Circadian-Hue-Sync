@@ -146,6 +146,11 @@ class SceneSyncManager:
         default_brightness = self._get_fallback_brightness()
         rooms = await self.client.async_get_rooms()
         brightness_by_room = self._get_room_brightness_by_name()
+        _LOGGER.debug(
+            "Resolved %d per-room Circadian brightness mapping(s): %s",
+            len(brightness_by_room),
+            sorted(brightness_by_room.keys()),
+        )
         if default_brightness is None and not brightness_by_room:
             raise SceneSyncError(
                 "No usable brightness sources found: configure a fallback brightness entity "
@@ -211,6 +216,11 @@ class SceneSyncManager:
             room.get("id"): _room_name(room) for room in rooms if room.get("id")
         }
         brightness_by_room = self._get_room_brightness_by_name()
+        _LOGGER.debug(
+            "Resolved %d per-room Circadian brightness mapping(s): %s",
+            len(brightness_by_room),
+            sorted(brightness_by_room.keys()),
+        )
         if default_brightness is None and not brightness_by_room:
             raise SceneSyncError(
                 "No usable brightness sources found: configure a fallback brightness entity "
@@ -298,33 +308,50 @@ class SceneSyncManager:
                 self.brightness_entity,
             )
         else:
-            brightness = brightness_state.attributes.get("brightness")
+            brightness = _extract_brightness_from_attributes(brightness_state.attributes)
             if brightness is not None:
-                return int(round(float(brightness)))
+                _LOGGER.debug(
+                    "Using configured fallback brightness entity '%s' with brightness=%s",
+                    self.brightness_entity,
+                    brightness,
+                )
+                return brightness
 
             _LOGGER.debug(
-                "Configured fallback brightness entity '%s' has no brightness attribute; auto-detecting Circadian Lighting switch",
+                "Configured fallback brightness entity '%s' has no usable brightness attribute; auto-detecting Circadian Lighting switch",
                 self.brightness_entity,
             )
 
         brightness = self._get_autodetected_fallback_brightness(prefer_unassigned=True)
         if brightness is not None:
+            _LOGGER.debug("Using auto-detected unassigned Circadian switch fallback brightness=%s", brightness)
             return brightness
 
         brightness = self._get_autodetected_fallback_brightness(prefer_unassigned=False)
         if brightness is not None:
+            _LOGGER.debug("Using auto-detected Circadian switch fallback brightness=%s", brightness)
             return brightness
 
         # Final fallback: use global circadian brightness when available.
         circadian_state = self.hass.states.get(self.circadian_sensor_entity)
         if circadian_state is not None:
-            circadian_brightness = circadian_state.attributes.get("brightness")
+            circadian_brightness = _extract_brightness_from_attributes(circadian_state.attributes)
             if circadian_brightness is not None:
                 _LOGGER.debug(
                     "Using circadian sensor '%s' brightness as fallback source",
                     self.circadian_sensor_entity,
                 )
-                return int(round(float(circadian_brightness)))
+                return circadian_brightness
+
+        # Last-resort fallback: derive brightness from colortemp if available.
+        try:
+            mirek = self._get_current_mirek()
+        except SceneSyncError:
+            _LOGGER.debug("Unable to derive fallback brightness from mirek: circadian sensor unavailable")
+            return None
+        derived = _derive_brightness_from_mirek(mirek)
+        _LOGGER.debug("Derived fallback brightness=%s from mirek=%s", derived, mirek)
+        return derived
 
         return None
 
@@ -334,14 +361,30 @@ class SceneSyncManager:
         brightness_by_room: dict[str, int] = {}
         for entity_id, state, area_id in self._iter_circadian_switch_states():
             if state is None or not area_id:
+                _LOGGER.debug(
+                    "Skipping Circadian switch '%s' for room mapping: state=%s area_id=%s",
+                    entity_id,
+                    "present" if state is not None else "missing",
+                    area_id,
+                )
                 continue
 
             area = area_registry.async_get_area(area_id)
             if not area:
+                _LOGGER.debug(
+                    "Skipping Circadian switch '%s': area_id '%s' not found in area registry",
+                    entity_id,
+                    area_id,
+                )
                 continue
 
-            brightness = state.attributes.get("brightness")
+            brightness = _extract_brightness_from_attributes(state.attributes)
             if brightness is None:
+                _LOGGER.debug(
+                    "Skipping Circadian switch '%s': no usable brightness attributes (keys=%s)",
+                    entity_id,
+                    sorted(state.attributes.keys()),
+                )
                 continue
 
             area_key = _normalize_name(area.name)
@@ -353,7 +396,14 @@ class SceneSyncManager:
                 )
                 continue
 
-            brightness_by_room[area_key] = int(round(float(brightness)))
+            brightness_by_room[area_key] = brightness
+            _LOGGER.debug(
+                "Mapped Circadian switch '%s' -> area '%s' (normalized '%s') -> brightness=%s",
+                entity_id,
+                area.name,
+                area_key,
+                brightness,
+            )
 
         return brightness_by_room
 
@@ -366,9 +416,19 @@ class SceneSyncManager:
     ) -> int | None:
         brightness = brightness_by_room.get(_normalize_name(room_name))
         if brightness is not None:
+            _LOGGER.debug(
+                "Using room-matched brightness=%s for Hue room '%s'",
+                brightness,
+                room_name or "<unknown>",
+            )
             return brightness
 
         if fallback_brightness is not None:
+            _LOGGER.debug(
+                "Using fallback brightness=%s for Hue room '%s' (no room match)",
+                fallback_brightness,
+                room_name or "<unknown>",
+            )
             return fallback_brightness
 
         _LOGGER.warning(
@@ -383,8 +443,13 @@ class SceneSyncManager:
             if state is None:
                 continue
 
-            brightness = state.attributes.get("brightness")
+            brightness = _extract_brightness_from_attributes(state.attributes)
             if brightness is None:
+                _LOGGER.debug(
+                    "Ignoring Circadian switch '%s' for fallback: no usable brightness attributes (keys=%s)",
+                    entity_id,
+                    sorted(state.attributes.keys()),
+                )
                 continue
 
             if prefer_unassigned and area_id:
@@ -394,7 +459,7 @@ class SceneSyncManager:
                 "Using auto-detected Circadian Lighting switch '%s' as fallback brightness source",
                 entity_id,
             )
-            return int(round(float(brightness)))
+            return brightness
 
         return None
 
@@ -402,6 +467,7 @@ class SceneSyncManager:
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
         yielded_entity_ids: set[str] = set()
+        discovered_registry = 0
 
         for entity_id in sorted(entity_registry.entities):
             entity_entry = entity_registry.entities[entity_id]
@@ -417,6 +483,14 @@ class SceneSyncManager:
                 area_id = device.area_id if device else None
 
             yielded_entity_ids.add(entity_entry.entity_id)
+            discovered_registry += 1
+            _LOGGER.debug(
+                "Discovered Circadian switch from registry: entity_id='%s' platform='%s' area_id='%s' device_id='%s'",
+                entity_entry.entity_id,
+                entity_entry.platform,
+                area_id,
+                entity_entry.device_id,
+            )
             yield entity_entry.entity_id, self.hass.states.get(entity_entry.entity_id), area_id
 
         # Some environments may have runtime switch states that are not discoverable
@@ -435,7 +509,19 @@ class SceneSyncManager:
                     device = device_registry.async_get(entity_entry.device_id)
                     area_id = device.area_id if device else None
 
+            _LOGGER.debug(
+                "Discovered Circadian switch from runtime state: entity_id='%s' area_id='%s' registry_entry=%s",
+                entity_id,
+                area_id,
+                entity_entry is not None,
+            )
             yield entity_id, self.hass.states.get(entity_id), area_id
+
+        _LOGGER.debug(
+            "Circadian switch discovery complete: registry_matches=%d runtime_total_switches=%d",
+            discovered_registry,
+            len(self.hass.states.async_entity_ids("switch")),
+        )
 
 
 class MultiBridgeSceneSyncManager:
@@ -615,3 +701,46 @@ def _is_circadian_switch(entity_entry: er.RegistryEntry) -> bool:
 
 def _is_circadian_switch_entity_id(entity_id: str) -> bool:
     return entity_id.startswith("switch.circadian_lighting")
+
+
+def _extract_brightness_from_attributes(attributes: dict[str, Any]) -> int | None:
+    # Try direct brightness-style attributes first.
+    direct_keys = ("brightness", "bri")
+    for key in direct_keys:
+        value = attributes.get(key)
+        brightness = _coerce_brightness(value)
+        if brightness is not None:
+            return brightness
+
+    # Then try percent-style attributes.
+    percent_keys = ("brightness_pct", "brightness_percent", "percent")
+    for key in percent_keys:
+        value = attributes.get(key)
+        percent = _coerce_float(value)
+        if percent is None:
+            continue
+        percent = min(100.0, max(0.0, percent))
+        return int(round((percent / 100.0) * 254.0))
+
+    return None
+
+
+def _derive_brightness_from_mirek(mirek: int) -> int:
+    # Preserve legacy behavior as a last resort: 500 mirek -> 254 brightness.
+    return int(round((float(mirek) / 500.0) * 254.0))
+
+
+def _coerce_brightness(value: Any) -> int | None:
+    numeric = _coerce_float(value)
+    if numeric is None:
+        return None
+    return int(round(min(254.0, max(0.0, numeric))))
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
