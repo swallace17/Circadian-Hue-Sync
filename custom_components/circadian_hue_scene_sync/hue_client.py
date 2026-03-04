@@ -140,8 +140,9 @@ class HueV2Client:
 
 
 def _build_action(light_id: str, brightness: int, mirek: int, include_on_action: bool) -> dict[str, Any]:
+    hue_brightness = _to_hue_brightness(brightness)
     action: dict[str, Any] = {
-        "dimming": {"brightness": brightness},
+        "dimming": {"brightness": hue_brightness},
         "color_temperature": {"mirek": mirek},
     }
     if include_on_action:
@@ -151,3 +152,11 @@ def _build_action(light_id: str, brightness: int, mirek: int, include_on_action:
         "target": {"rid": light_id, "rtype": "light"},
         "action": action,
     }
+
+
+def _to_hue_brightness(brightness: int | float) -> float:
+    value = float(brightness)
+    # HA-style brightness is often 0..255; Hue v2 dimming brightness is 0..100.
+    if value > 100.0:
+        value = (value / 255.0) * 100.0
+    return max(0.0, min(100.0, value))
