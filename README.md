@@ -7,6 +7,7 @@ Home Assistant custom integration that precomputes and keeps Hue scenes in sync 
 - Auto-discovers all configured Home Assistant Hue bridges and uses their existing credentials.
 - Creates missing Hue room scenes (default name: `circadian`).
 - Updates existing scenes when circadian values change.
+- Auto-detects Circadian Lighting switch entities assigned to Home Assistant Areas and applies each switch brightness to Hue rooms with matching names.
 - Exposes manual services and button entities for testing/recovery.
 
 ## Requirements
@@ -57,3 +58,4 @@ Each service optionally supports `entry_id` to target a specific integration ent
 
 - This integration uses Hue CLIP API v2 endpoints.
 - SSL verification defaults to disabled, matching many local Hue bridge environments.
+- If no per-room Circadian Lighting switch matches a Hue room name, the integration falls back to the configured brightness entity.

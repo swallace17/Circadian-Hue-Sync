@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import area_registry as ar, device_registry as dr, entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -140,8 +141,15 @@ class SceneSyncManager:
     async def _async_create_missing_scenes_locked(self) -> SyncResult:
         result = SyncResult()
 
-        brightness, mirek = self._get_current_targets()
+        mirek = self._get_current_mirek()
+        default_brightness = self._get_fallback_brightness()
         rooms = await self.client.async_get_rooms()
+        brightness_by_room = self._get_room_brightness_by_name()
+        if default_brightness is None and not brightness_by_room:
+            raise SceneSyncError(
+                "No usable brightness sources found: configure a fallback brightness entity "
+                "or assign Circadian Lighting switches with brightness attributes to areas."
+            )
         scenes = await self.client.async_get_scenes()
         devices = await self.client.async_get_devices()
 
@@ -169,6 +177,16 @@ class SceneSyncManager:
                 result.skipped += 1
                 continue
 
+            room_name = _room_name(room)
+            brightness = self._resolve_room_brightness(
+                room_name=room_name,
+                brightness_by_room=brightness_by_room,
+                fallback_brightness=default_brightness,
+            )
+            if brightness is None:
+                result.skipped += 1
+                continue
+
             await self.client.async_create_scene(
                 scene_name=self.scene_name,
                 room_id=room_id,
@@ -185,7 +203,18 @@ class SceneSyncManager:
     async def _async_sync_scenes_locked(self) -> SyncResult:
         result = SyncResult()
 
-        brightness, mirek = self._get_current_targets()
+        mirek = self._get_current_mirek()
+        default_brightness = self._get_fallback_brightness()
+        rooms = await self.client.async_get_rooms()
+        room_name_by_id = {
+            room.get("id"): _room_name(room) for room in rooms if room.get("id")
+        }
+        brightness_by_room = self._get_room_brightness_by_name()
+        if default_brightness is None and not brightness_by_room:
+            raise SceneSyncError(
+                "No usable brightness sources found: configure a fallback brightness entity "
+                "or assign Circadian Lighting switches with brightness attributes to areas."
+            )
         scenes = await self.client.async_get_scenes()
         circadian_scenes = [
             scene for scene in scenes if scene.get("metadata", {}).get("name") == self.scene_name
@@ -199,6 +228,17 @@ class SceneSyncManager:
 
             light_ids = _extract_scene_light_ids(scene)
             if not light_ids:
+                result.skipped += 1
+                continue
+
+            room_id = scene.get("group", {}).get("rid")
+            room_name = room_name_by_id.get(room_id, "")
+            brightness = self._resolve_room_brightness(
+                room_name=room_name,
+                brightness_by_room=brightness_by_room,
+                fallback_brightness=default_brightness,
+            )
+            if brightness is None:
                 result.skipped += 1
                 continue
 
@@ -234,7 +274,7 @@ class SceneSyncManager:
 
         return result
 
-    def _get_current_targets(self) -> tuple[int, int]:
+    def _get_current_mirek(self) -> int:
         circadian_state = self.hass.states.get(self.circadian_sensor_entity)
         if circadian_state is None:
             raise SceneSyncError(
@@ -247,20 +287,85 @@ class SceneSyncManager:
                 f"Circadian sensor missing 'colortemp' attribute: {self.circadian_sensor_entity}"
             )
 
+        return int(round(1_000_000 / float(colortemp_kelvin)))
+
+    def _get_fallback_brightness(self) -> int | None:
         brightness_state = self.hass.states.get(self.brightness_entity)
         if brightness_state is None:
-            raise SceneSyncError(
-                f"Brightness entity not found: {self.brightness_entity}"
-            )
+            return None
 
         brightness = brightness_state.attributes.get("brightness")
         if brightness is None:
-            raise SceneSyncError(
-                f"Brightness entity missing 'brightness' attribute: {self.brightness_entity}"
-            )
+            return None
 
-        mirek = int(round(1_000_000 / float(colortemp_kelvin)))
-        return int(round(float(brightness))), mirek
+        return int(round(float(brightness)))
+
+    def _get_room_brightness_by_name(self) -> dict[str, int]:
+        entity_registry = er.async_get(self.hass)
+        area_registry = ar.async_get(self.hass)
+        device_registry = dr.async_get(self.hass)
+
+        brightness_by_room: dict[str, int] = {}
+        for entity_entry in entity_registry.entities.values():
+            if entity_entry.domain != "switch":
+                continue
+
+            if not _is_circadian_switch(entity_entry):
+                continue
+
+            area_id = entity_entry.area_id
+            if not area_id and entity_entry.device_id:
+                device = device_registry.async_get(entity_entry.device_id)
+                area_id = device.area_id if device else None
+
+            if not area_id:
+                continue
+
+            area = area_registry.async_get_area(area_id)
+            if not area:
+                continue
+
+            state = self.hass.states.get(entity_entry.entity_id)
+            if state is None:
+                continue
+
+            brightness = state.attributes.get("brightness")
+            if brightness is None:
+                continue
+
+            area_key = _normalize_name(area.name)
+            if area_key in brightness_by_room:
+                _LOGGER.debug(
+                    "Ignoring additional Circadian switch '%s' for area '%s'; using first discovered brightness source",
+                    entity_entry.entity_id,
+                    area.name,
+                )
+                continue
+
+            brightness_by_room[area_key] = int(round(float(brightness)))
+
+        return brightness_by_room
+
+    def _resolve_room_brightness(
+        self,
+        *,
+        room_name: str,
+        brightness_by_room: dict[str, int],
+        fallback_brightness: int | None,
+    ) -> int | None:
+        brightness = brightness_by_room.get(_normalize_name(room_name))
+        if brightness is not None:
+            return brightness
+
+        if fallback_brightness is not None:
+            return fallback_brightness
+
+        _LOGGER.warning(
+            "Skipping scene for room '%s': no matching Circadian Lighting switch brightness and fallback entity '%s' is unavailable",
+            room_name or "<unknown>",
+            self.brightness_entity,
+        )
+        return None
 
 
 class MultiBridgeSceneSyncManager:
@@ -421,3 +526,18 @@ def _extract_scene_light_ids(scene: dict) -> list[str]:
         if target.get("rtype") == "light" and target.get("rid"):
             light_ids.append(target["rid"])
     return light_ids
+
+
+def _normalize_name(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _room_name(room: dict) -> str:
+    return str(room.get("metadata", {}).get("name") or "")
+
+
+def _is_circadian_switch(entity_entry: er.RegistryEntry) -> bool:
+    if entity_entry.platform == "circadian_lighting":
+        return True
+
+    return entity_entry.entity_id.startswith("switch.circadian_lighting_")
