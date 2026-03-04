@@ -155,8 +155,6 @@ def _build_action(light_id: str, brightness: int, mirek: int, include_on_action:
 
 
 def _to_hue_brightness(brightness: int | float) -> float:
-    value = float(brightness)
-    # HA-style brightness is often 0..255; Hue v2 dimming brightness is 0..100.
-    if value > 100.0:
-        value = (value / 255.0) * 100.0
-    return max(0.0, min(100.0, value))
+    # Treat source brightness as HA scale (0..255) and always convert to Hue v2 scale (0..100).
+    value = max(0.0, min(255.0, float(brightness)))
+    return (value / 255.0) * 100.0
