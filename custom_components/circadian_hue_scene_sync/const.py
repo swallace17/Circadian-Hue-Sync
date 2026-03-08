@@ -19,7 +19,7 @@ CONF_INCLUDE_ON_ACTION: Final = "include_on_action"
 CONF_VERIFY_SSL: Final = "verify_ssl"
 
 DEFAULT_CIRCADIAN_SENSOR_ENTITY: Final = "sensor.circadian_values"
-DEFAULT_BRIGHTNESS_ENTITY: Final = "switch.circadian_lighting_circadian_lighting"
+DEFAULT_BRIGHTNESS_ENTITY: Final = DEFAULT_CIRCADIAN_SENSOR_ENTITY
 DEFAULT_SCENE_NAME: Final = "circadian"
 DEFAULT_SCENES_PER_SECOND: Final = 5
 DEFAULT_AUTO_UPDATE_ON_CIRCADIAN_CHANGE: Final = True

@@ -54,6 +54,15 @@ class SyncResult:
     deleted: int = 0
 
 
+@dataclass(slots=True, frozen=True)
+class BrightnessValue:
+    """Normalized brightness in Hue's 0-100 scale plus source details."""
+
+    percent: float
+    attribute: str
+    scale: str
+
+
 class SceneSyncManager:
     """Manage room-scene creation and updates."""
 
@@ -300,7 +309,7 @@ class SceneSyncManager:
 
         return int(round(1_000_000 / float(colortemp_kelvin)))
 
-    def _get_fallback_brightness(self) -> int | None:
+    def _get_fallback_brightness(self) -> float | None:
         brightness_state = self.hass.states.get(self.brightness_entity)
         if brightness_state is None:
             _LOGGER.debug(
@@ -308,57 +317,53 @@ class SceneSyncManager:
                 self.brightness_entity,
             )
         else:
-            brightness = _extract_brightness_from_attributes(brightness_state.attributes)
+            brightness = _extract_brightness_from_state(
+                self.brightness_entity,
+                brightness_state.attributes,
+            )
             if brightness is not None:
                 _LOGGER.debug(
-                    "Using configured fallback brightness entity '%s' with brightness=%s",
+                    "Using configured fallback brightness entity '%s' with brightness=%s via %s (%s)",
                     self.brightness_entity,
-                    brightness,
+                    brightness.percent,
+                    brightness.attribute,
+                    brightness.scale,
                 )
-                return brightness
+                return brightness.percent
 
             _LOGGER.debug(
                 "Configured fallback brightness entity '%s' has no usable brightness attribute; auto-detecting Circadian Lighting switch",
                 self.brightness_entity,
             )
 
-        brightness = self._get_autodetected_fallback_brightness(prefer_unassigned=True)
+        brightness = self._get_global_circadian_switch_brightness()
         if brightness is not None:
-            _LOGGER.debug("Using auto-detected unassigned Circadian switch fallback brightness=%s", brightness)
             return brightness
 
-        brightness = self._get_autodetected_fallback_brightness(prefer_unassigned=False)
-        if brightness is not None:
-            _LOGGER.debug("Using auto-detected Circadian switch fallback brightness=%s", brightness)
-            return brightness
-
-        # Final fallback: use global circadian brightness when available.
+        # Final fallback: use circadian sensor brightness when available.
         circadian_state = self.hass.states.get(self.circadian_sensor_entity)
         if circadian_state is not None:
-            circadian_brightness = _extract_brightness_from_attributes(circadian_state.attributes)
+            circadian_brightness = _extract_brightness_from_state(
+                self.circadian_sensor_entity,
+                circadian_state.attributes,
+            )
             if circadian_brightness is not None:
                 _LOGGER.debug(
-                    "Using circadian sensor '%s' brightness as fallback source",
+                    "Using circadian sensor '%s' brightness=%s via %s (%s) as fallback source",
                     self.circadian_sensor_entity,
+                    circadian_brightness.percent,
+                    circadian_brightness.attribute,
+                    circadian_brightness.scale,
                 )
-                return circadian_brightness
+                return circadian_brightness.percent
 
-        # Last-resort fallback: derive brightness from colortemp if available.
-        try:
-            mirek = self._get_current_mirek()
-        except SceneSyncError:
-            _LOGGER.debug("Unable to derive fallback brightness from mirek: circadian sensor unavailable")
-            return None
-        derived = _derive_brightness_from_mirek(mirek)
-        _LOGGER.debug("Derived fallback brightness=%s from mirek=%s", derived, mirek)
-        return derived
-
+        _LOGGER.debug("No global fallback brightness source was found")
         return None
 
-    def _get_room_brightness_by_name(self) -> dict[str, int]:
+    def _get_room_brightness_by_name(self) -> dict[str, float]:
         area_registry = ar.async_get(self.hass)
 
-        brightness_by_room: dict[str, int] = {}
+        brightness_by_room: dict[str, float] = {}
         for entity_id, state, area_id in self._iter_circadian_switch_states():
             if state is None or not area_id:
                 _LOGGER.debug(
@@ -378,7 +383,7 @@ class SceneSyncManager:
                 )
                 continue
 
-            brightness = _extract_brightness_from_attributes(state.attributes)
+            brightness = _extract_brightness_from_state(entity_id, state.attributes)
             if brightness is None:
                 _LOGGER.debug(
                     "Skipping Circadian switch '%s': no usable brightness attributes (keys=%s)",
@@ -396,13 +401,15 @@ class SceneSyncManager:
                 )
                 continue
 
-            brightness_by_room[area_key] = brightness
+            brightness_by_room[area_key] = brightness.percent
             _LOGGER.debug(
-                "Mapped Circadian switch '%s' -> area '%s' (normalized '%s') -> brightness=%s",
+                "Mapped Circadian switch '%s' -> area '%s' (normalized '%s') -> brightness=%s via %s (%s)",
                 entity_id,
                 area.name,
                 area_key,
-                brightness,
+                brightness.percent,
+                brightness.attribute,
+                brightness.scale,
             )
 
         return brightness_by_room
@@ -411,9 +418,9 @@ class SceneSyncManager:
         self,
         *,
         room_name: str,
-        brightness_by_room: dict[str, int],
-        fallback_brightness: int | None,
-    ) -> int | None:
+        brightness_by_room: dict[str, float],
+        fallback_brightness: float | None,
+    ) -> float | None:
         brightness = brightness_by_room.get(_normalize_name(room_name))
         if brightness is not None:
             _LOGGER.debug(
@@ -438,12 +445,15 @@ class SceneSyncManager:
         )
         return None
 
-    def _get_autodetected_fallback_brightness(self, *, prefer_unassigned: bool) -> int | None:
+    def _get_global_circadian_switch_brightness(self) -> float | None:
         for entity_id, state, area_id in self._iter_circadian_switch_states():
             if state is None:
                 continue
 
-            brightness = _extract_brightness_from_attributes(state.attributes)
+            if area_id:
+                continue
+
+            brightness = _extract_brightness_from_state(entity_id, state.attributes)
             if brightness is None:
                 _LOGGER.debug(
                     "Ignoring Circadian switch '%s' for fallback: no usable brightness attributes (keys=%s)",
@@ -452,14 +462,14 @@ class SceneSyncManager:
                 )
                 continue
 
-            if prefer_unassigned and area_id:
-                continue
-
             _LOGGER.debug(
-                "Using auto-detected Circadian Lighting switch '%s' as fallback brightness source",
+                "Using auto-detected global Circadian switch '%s' brightness=%s via %s (%s) as fallback source",
                 entity_id,
+                brightness.percent,
+                brightness.attribute,
+                brightness.scale,
             )
-            return brightness
+            return brightness.percent
 
         return None
 
@@ -703,38 +713,72 @@ def _is_circadian_switch_entity_id(entity_id: str) -> bool:
     return entity_id.startswith("switch.circadian_lighting")
 
 
-def _extract_brightness_from_attributes(attributes: dict[str, Any]) -> int | None:
-    # Try direct brightness-style attributes first.
-    direct_keys = ("brightness", "bri")
-    for key in direct_keys:
-        value = attributes.get(key)
-        brightness = _coerce_brightness(value)
-        if brightness is not None:
-            return brightness
-
-    # Then try percent-style attributes.
+def _extract_brightness_from_state(
+    entity_id: str,
+    attributes: dict[str, Any],
+) -> BrightnessValue | None:
     percent_keys = ("brightness_pct", "brightness_percent", "percent")
     for key in percent_keys:
-        value = attributes.get(key)
-        percent = _coerce_float(value)
-        if percent is None:
+        percent = _coerce_percent(attributes.get(key))
+        if percent is not None:
+            return BrightnessValue(percent=percent, attribute=key, scale="percent")
+
+    direct_keys = ("brightness", "bri")
+    for key in direct_keys:
+        raw_value = _coerce_float(attributes.get(key))
+        if raw_value is None:
             continue
-        percent = min(100.0, max(0.0, percent))
-        return int(round((percent / 100.0) * 254.0))
+
+        scale = _infer_direct_brightness_scale(entity_id, attributes, key, raw_value)
+        percent = _normalize_brightness_to_percent(raw_value, scale)
+        return BrightnessValue(percent=percent, attribute=key, scale=scale)
 
     return None
 
 
-def _derive_brightness_from_mirek(mirek: int) -> int:
-    # Preserve legacy behavior as a last resort: 500 mirek -> 254 brightness.
-    return int(round((float(mirek) / 500.0) * 254.0))
+def _infer_direct_brightness_scale(
+    entity_id: str,
+    attributes: dict[str, Any],
+    attribute: str,
+    raw_value: float,
+) -> str:
+    unit = str(attributes.get("unit_of_measurement") or "").strip().lower()
+    if unit in {"%", "percent"}:
+        return "percent"
+
+    max_value = _coerce_float(attributes.get("max"))
+    if max_value is not None:
+        if max_value <= 100.0:
+            return "percent"
+        if max_value <= 255.0:
+            return "ha255"
+
+    if attribute == "bri":
+        return "ha255"
+
+    domain = entity_id.split(".", 1)[0] if "." in entity_id else ""
+    if domain == "light":
+        return "ha255"
+
+    if _is_circadian_switch_entity_id(entity_id) or domain == "sensor":
+        return "percent" if raw_value <= 100.0 else "ha255"
+
+    return "ha255" if raw_value > 100.0 else "percent"
 
 
-def _coerce_brightness(value: Any) -> int | None:
+def _normalize_brightness_to_percent(value: float, scale: str) -> float:
+    if scale == "ha255":
+        clamped = min(255.0, max(0.0, value))
+        return (clamped / 255.0) * 100.0
+
+    return min(100.0, max(0.0, value))
+
+
+def _coerce_percent(value: Any) -> float | None:
     numeric = _coerce_float(value)
     if numeric is None:
         return None
-    return int(round(min(254.0, max(0.0, numeric))))
+    return min(100.0, max(0.0, numeric))
 
 
 def _coerce_float(value: Any) -> float | None:

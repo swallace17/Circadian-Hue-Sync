@@ -98,7 +98,7 @@ class HueV2Client:
         scene_name: str,
         room_id: str,
         light_ids: list[str],
-        brightness: int,
+        brightness: float,
         mirek: int,
         include_on_action: bool,
     ) -> dict[str, Any]:
@@ -124,7 +124,7 @@ class HueV2Client:
         *,
         scene_id: str,
         light_ids: list[str],
-        brightness: int,
+        brightness: float,
         mirek: int,
         include_on_action: bool,
     ) -> dict[str, Any]:
@@ -139,7 +139,7 @@ class HueV2Client:
         return await self._request("DELETE", f"/scene/{scene_id}")
 
 
-def _build_action(light_id: str, brightness: int, mirek: int, include_on_action: bool) -> dict[str, Any]:
+def _build_action(light_id: str, brightness: float, mirek: int, include_on_action: bool) -> dict[str, Any]:
     hue_brightness = _to_hue_brightness(brightness)
     action: dict[str, Any] = {
         "dimming": {"brightness": hue_brightness},
@@ -155,6 +155,5 @@ def _build_action(light_id: str, brightness: int, mirek: int, include_on_action:
 
 
 def _to_hue_brightness(brightness: int | float) -> float:
-    # Treat source brightness as HA scale (0..255) and always convert to Hue v2 scale (0..100).
-    value = max(0.0, min(255.0, float(brightness)))
-    return (value / 255.0) * 100.0
+    # Scene manager passes normalized Hue dimming brightness (0..100).
+    return max(0.0, min(100.0, float(brightness)))
